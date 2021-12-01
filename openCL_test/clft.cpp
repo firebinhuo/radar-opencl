@@ -12,17 +12,10 @@
 
 /* No need to explicitely include the OpenCL headers */
 #include <clFFT.h>
-//	/*
-//		手柄	处理先前创建的计划
-//		队列数	commQueueFFT 中的命令队列数；0 是一个有效值，在这种情况下客户端不希望运行时运行负载实验而只预先计算状态信息
-//		队列FFT	客户端创建的 cl_command_queue 数组；命令队列必须是计划上下文中包含的设备的适当子集
-//		pfn_notify	指向通知例程的函数指针。通知例程是一个回调函数，应用程序可以注册并在程序可执行文件构建（成功或不成功）时调用。目前，此参数必须为 NULL 或 nullptr。
-//		用户数据	调用 pfn_notify 时作为参数传递。目前，此参数必须为 NULL 或 nullptr。
-//	*/
-#define pi 3.1416
+#include <Windows.h>
+//#define pi 3.1416
 
 //读数据
-
 int readDataFromFile(const char *path,float *arr) {
 	FILE *fp;
 	int ch, i = 0, n = 0;
@@ -49,23 +42,7 @@ int readDataFromFile(const char *path,float *arr) {
 }
 
 int defArgs() {
-	/*
-		C=3.0e8;  %光速(m/s)
-		RF=3.140e9/2;  %雷达射频
-		Lambda=C/RF;%雷达工作波长
-		PulseNumber=16;   %回波脉冲数 
-		BandWidth=2.0e6;  %发射信号带宽
-		TimeWidth=42.0e-6; %发射信号时宽(脉冲宽度)
-		%PRT=4.096e-3;   % 雷达发射脉冲重复周期(s),240us对应1/2*240*300=36000米
-		PRT=240e-6;   % 雷达发射脉冲重复周期(s),240us对应1/2*240*300=36000米
-		PRF=1/PRT;
-		Fs=2.0e6;  %采样频率
-		NoisePower=-12;%(dB);%噪声功率（目标为0dB）
-		% ---------------------------------------------------------------%
-		SampleNumber=fix(Fs*PRT);%计算一个脉冲周期的采样点数480；
-		TotalNumber=SampleNumber*PulseNumber;%总的采样点数480*16=7680；
-		BlindNumber=fix(Fs*TimeWidth);%计算一个脉冲周期的盲区-遮挡样点数；
-	*/
+	
 	float C = 3.0e8f;
 	float Fs = 2.0e6;  //采样频率
 	float BandWidth = 2.0e6; // %发射信号带宽
@@ -88,9 +65,25 @@ int defArgs() {
 	_Dcomplex z = cexp(result1); // Euler's formula
 
 }
+void LogInfo(const char* str, ...)
+{
+	if (str)
+	{
+		va_list args;
+		va_start(args, str);
 
+		vfprintf(stdout, str, args);
+
+		va_end(args);
+	}
+}
 int main(void)
 {
+	
+	LARGE_INTEGER perfFrequency;
+	LARGE_INTEGER performanceCountNDRangeStart;
+	LARGE_INTEGER performanceCountNDRangeStop;
+
 	const size_t N = 8192;
 	float Fs = 2.0e6;  //采样频率
 	float BandWidth = 2.0e6; // %发射信号带宽
@@ -155,31 +148,17 @@ int main(void)
 	err = clfftInitSetupData(&fftSetup);
 	err = clfftSetup(&fftSetup);
 
-	/* Allocate host & initialize data. */
-	/* Only allocation shown for simplicity. */
-	//X = (float *)malloc(N * 2 * sizeof(*X));
+	bool queueProfilingEnable = true;
+	if (queueProfilingEnable)
+		QueryPerformanceCounter(&performanceCountNDRangeStart);
+	
 
-	/* print input array */
-	/*printf("\nPerforming fft on an one dimensional array of size N = %lu\n", (unsigned long)N);
-	int print_iter = 0;
-	while (print_iter < N) {
-		float x = (float)print_iter;
-		float y = (float)print_iter * 3;
-		X[2 * print_iter] = x;
-		X[2 * print_iter + 1] = y;
-		printf("(%0.2f, %0.2f) ", x, y);
-		print_iter++;
-	}
-	printf("\n\nfft result: \n");*/
 
 	//流水线
-
 	cl_mem bufSignal = clCreateBuffer(ctx, CL_MEM_READ_WRITE, N * 2 * sizeof(float), NULL, &err);
 	err = clEnqueueWriteBuffer(queue, bufSignal, CL_TRUE, 0,
 		N * 2 * sizeof(float), arr, 0, NULL, NULL);
 
-	cl_mem bufChirp = clCreateBuffer(ctx, CL_MEM_READ_WRITE, N * 2 * sizeof(float), NULL, &err);
-	err = clEnqueueWriteBuffer(queue, bufChirp, CL_TRUE, 0, N * 2 * sizeof(float), chirp, 0, NULL, NULL);
 	/* Create a default plan for a complex FFT. */
 	err = clfftCreateDefaultPlan(&planHandle, ctx, dim, clLengths);
 
@@ -187,28 +166,44 @@ int main(void)
 	err = clfftSetPlanPrecision(planHandle, CLFFT_SINGLE);//设置 FFT 数据的浮点精度。
 	err = clfftSetLayout(planHandle, CLFFT_COMPLEX_INTERLEAVED, CLFFT_COMPLEX_INTERLEAVED);//设置输入和输出缓冲区的预期布局
 	err = clfftSetResultLocation(planHandle, CLFFT_INPLACE);
-	const char* postcallbackstr = "void post(__global void *output, uint outoffset, __global void *userdata, float2 fftoutput, __local void *localmem )\
-	{\
-		*((__global float2*)output + outoffset) = fftoutput;\
-	}";
-	/*int h_postuserdata[N * 2] = {  };
-	cl_mem postuserdata = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * N * 2, (void*)h_postuserdata, NULL);*/
-	//clfftSetPlanCallback(planHandle,"post", postcallbackstr, 0, POSTCALLBACK, NULL, 0);
+	/* Execute the plan. */
+	err = clfftEnqueueTransform(planHandle, CLFFT_FORWARD, 1, &queue, 0, NULL, NULL, &bufSignal, NULL, NULL);
+
+	err = clEnqueueReadBuffer(queue, bufSignal, CL_TRUE, 0, N * 2 * sizeof(float), arr, 0, NULL, NULL);
+
+	cl_mem bufChirp = clCreateBuffer(ctx, CL_MEM_READ_WRITE, N * 2 * sizeof(float), NULL, &err);
+	err = clEnqueueWriteBuffer(queue, bufChirp, CL_TRUE, 0, N * 2 * sizeof(float), chirp, 0, NULL, NULL);
+	
+
 	/* Bake the plan. */
 	err = clfftBakePlan(planHandle, 1, &queue, NULL, NULL);
 
 	/* Execute the plan. */
-	err = clfftEnqueueTransform(planHandle, CLFFT_FORWARD, 1, &queue, 0, NULL, NULL, &bufSignal, NULL, NULL);
-	//err = clfftEnqueueTransform(planHandle, CLFFT_FORWARD, 1, &queue, 0, NULL, NULL, &bufChirp, NULL, NULL);
+	//err = clfftEnqueueTransform(planHandle, CLFFT_FORWARD, 1, &queue, 0, NULL, NULL, &bufSignal, NULL, NULL);
+	err = clfftEnqueueTransform(planHandle, CLFFT_FORWARD, 1, &queue, 0, NULL, NULL, &bufChirp, NULL, NULL);
 	//err = clfftEnqueueTransform(planHandle, CLFFT_BACKWARD, 1, &queue, 0, NULL, NULL, &bufX, NULL, NULL);
+		/* Fetch results of calculations. */
 	
 	/* Wait for calculations to be finished. */
 	err = clFinish(queue);
 
 	/* Fetch results of calculations. */
-	err = clEnqueueReadBuffer(queue, bufSignal, CL_TRUE, 0, N * 2 * sizeof(float), arr, 0, NULL, NULL);
+	//err = clEnqueueReadBuffer(queue, bufSignal, CL_TRUE, 0, N * 2 * sizeof(float), arr, 0, NULL, NULL);
 	err = clEnqueueReadBuffer(queue, bufChirp, CL_TRUE, 0, N * 2 * sizeof(float), chirp, 0, NULL, NULL);
-
+	// Execute (enqueue) the kernel
+	if (CL_SUCCESS != err)
+	{
+		return -1;
+	}
+	if (queueProfilingEnable)
+		QueryPerformanceCounter(&performanceCountNDRangeStop);
+	// retrieve performance counter frequency
+	if (queueProfilingEnable)
+	{
+		QueryPerformanceFrequency(&perfFrequency);
+		LogInfo("三级流水线执行时间 %f ms.\n",
+			1000.0f*(float)(performanceCountNDRangeStop.QuadPart - performanceCountNDRangeStart.QuadPart) / (float)perfFrequency.QuadPart);
+	}
 	/* print output array */
 	//print_iter = 0;
 	//while (print_iter < N) {
